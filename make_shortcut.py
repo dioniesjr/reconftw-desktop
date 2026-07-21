@@ -1,51 +1,50 @@
-"""Create a Desktop shortcut that launches the GUI with no console window."""
+﻿"""Create a Desktop shortcut that launches the GUI with no console window."""
 from __future__ import annotations
 
 import os
 import sys
 from pathlib import Path
 
-try:
-    import win32com.client  # type: ignore
-except ImportError:
-    win32com = None
+APP_NAME = "ReconFTW Desktop"
+ICON_REL = r"assets\reconftw.ico"
 
 
-def create_shortcut(name: str, target: Path, workdir: Path, icon: Path | None = None) -> Path:
-    desktop = Path.home() / "Desktop"
-    if not desktop.exists():
-        desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
-    link = desktop / f"{name}.lnk"
+def create_shortcut() -> Path:
+    root = Path(__file__).resolve().parent
+    app = root / "app.py"
+    icon = root / ICON_REL
+    desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
+    link = desktop / f"{APP_NAME}.lnk"
 
-    # Prefer pythonw for console-less launch
     pyw = Path(sys.executable).with_name("pythonw.exe")
     if not pyw.exists():
         pyw = Path(sys.executable)
 
-    if win32com is None:
-        # Fallback: write a .bat that starts pythonw hidden via VBS companion
-        vbs = desktop / f"Launch {name}.vbs"
-        vbs.write_text(
-            f'CreateObject("Wscript.Shell").Run """{pyw}"" ""{target}""", 0, False\n',
-            encoding="utf-8",
+    try:
+        import win32com.client  # type: ignore
+    except ImportError:
+        # PowerShell fallback
+        ps = (
+            f"$ws=New-Object -ComObject WScript.Shell; "
+            f"$s=$ws.CreateShortcut('{link}'); "
+            f"$s.TargetPath='{pyw}'; $s.Arguments='\"{app}\"'; "
+            f"$s.WorkingDirectory='{root}'; "
+            f"$s.IconLocation='{icon},0'; $s.Save()"
         )
-        return vbs
+        os.system(f'powershell -NoProfile -Command "{ps}"')
+        return link
 
     shell = win32com.client.Dispatch("WScript.Shell")
     sc = shell.CreateShortCut(str(link))
     sc.Targetpath = str(pyw)
-    sc.Arguments = f'"{target}"'
-    sc.WorkingDirectory = str(workdir)
-    sc.Description = name
-    if icon and icon.exists():
-        sc.IconLocation = str(icon)
+    sc.Arguments = f'"{app}"'
+    sc.WorkingDirectory = str(root)
+    sc.Description = APP_NAME
+    if icon.exists():
+        sc.IconLocation = f"{icon},0"
     sc.save()
     return link
 
 
 if __name__ == "__main__":
-    root = Path(__file__).resolve().parent
-    app = root / "app.py"
-    name = os.environ.get("SCANNER_SHORTCUT_NAME", root.name.replace("-", " ").title())
-    path = create_shortcut(name, app, root)
-    print(path)
+    print(create_shortcut())
