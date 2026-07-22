@@ -4,13 +4,14 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
-import time
+import tkinter.filedialog as filedialog
 import tkinter.messagebox as messagebox
 from pathlib import Path
 
 import customtkinter as ctk
 
 import docker_util
+from folder_readable import make_reconftw_readable
 
 APP_TITLE = "ReconFTW Desktop"
 IMAGE = "six2dez/reconftw:main"
@@ -23,7 +24,7 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
         self.title(APP_TITLE)
-        self.geometry("860x680")
+        self.geometry("860x720")
         self.minsize(740, 580)
         RESULTS.mkdir(parents=True, exist_ok=True)
 
@@ -54,11 +55,13 @@ class App(ctk.CTk):
         self.btn_scan = ctk.CTkButton(row, text="2. Start Full Scan", height=40, fg_color="#238636", command=self.scan)
         self.btn_scan.pack(side="left", padx=(0, 8))
         self.btn_results = ctk.CTkButton(row, text="Open Results", height=40, fg_color="#444C56", command=lambda: docker_util.open_folder(RESULTS))
-        self.btn_results.pack(side="left")
+        self.btn_results.pack(side="left", padx=(0, 8))
+        self.btn_readable = ctk.CTkButton(row, text="Make Readable Report", height=40, fg_color="#8250DF", command=self.make_readable)
+        self.btn_readable.pack(side="left")
 
         ctk.CTkLabel(
             self,
-            text="Deep scans can take a long time. Leave this window open. Results appear in your ScannerResults folder.",
+            text="After a scan, open START_HERE_readable.html. Empty folders usually mean no findings for that stage.",
             text_color="#8B949E",
             wraplength=800,
             justify="left",
@@ -84,7 +87,7 @@ class App(ctk.CTk):
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
-        for b in (self.btn_setup, self.btn_scan, self.btn_results):
+        for b in (self.btn_setup, self.btn_scan, self.btn_results, self.btn_readable):
             b.configure(state=state)
         if busy:
             self.progress.configure(mode="indeterminate")
@@ -107,6 +110,37 @@ class App(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _build_readable(self, out_dir: Path, log) -> Path | None:
+        try:
+            report = make_reconftw_readable(out_dir)
+            log(f"Readable report: {report}")
+            docker_util.open_url(report.as_uri())
+            return report
+        except Exception as exc:
+            log(f"Readable report failed: {exc}")
+            return None
+
+    def make_readable(self) -> None:
+        initial = RESULTS
+        dirs = sorted([p for p in RESULTS.glob("*") if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True)
+        if dirs:
+            initial = dirs[0]
+        chosen = filedialog.askdirectory(title="Choose ReconFTW result folder", initialdir=str(initial))
+        if not chosen:
+            return
+        path = Path(chosen)
+
+        def job() -> None:
+            log = lambda m: self.after(0, lambda msg=m: self.write(msg))
+            self.after(0, lambda: self.set_status("Building readable report...", True))
+            report = self._build_readable(path, log)
+            ok = report is not None
+            self.after(0, lambda: self.set_status("Readable report ready" if ok else "Readable report failed", ok))
+            if report:
+                self.after(0, lambda: messagebox.showinfo(APP_TITLE, f"Readable report opened.\n\n{report}"))
+
+        self._run(job)
+
     def setup(self) -> None:
         def job() -> None:
             log = lambda m: self.after(0, lambda msg=m: self.write(msg))
@@ -127,7 +161,6 @@ class App(ctk.CTk):
             messagebox.showwarning(APP_TITLE, "Enter a valid domain like example.com")
             return
         mode = self.mode.get()
-        # reconFTW: -r full, --deep deep, or lighter options
         extra = []
         if mode == "Quick":
             extra = ["--soft"]
@@ -145,7 +178,6 @@ class App(ctk.CTk):
                 return
             out_dir = RESULTS / domain.replace(":", "_")
             out_dir.mkdir(parents=True, exist_ok=True)
-            # Mount results; reconFTW writes under /reconftw/Recon by default in many images
             cmd = [
                 "docker", "run", "--rm",
                 "-v", f"{out_dir}:/reconftw/Recon",
@@ -168,11 +200,14 @@ class App(ctk.CTk):
                 line = line.strip()
                 if line:
                     log(line[:220])
-            code = proc.wait()
-            ok = code == 0
-            self.after(0, lambda: self.set_status("Scan finished" if ok else "Scan ended (check results folder)", True))
+            proc.wait()
+            report = self._build_readable(out_dir, log)
+            self.after(0, lambda: self.set_status("Scan finished", True))
             docker_util.open_folder(out_dir)
-            self.after(0, lambda: messagebox.showinfo(APP_TITLE, f"Scan finished for {domain}.\nResults folder opened."))
+            msg = f"Scan finished for {domain}."
+            if report:
+                msg += f"\n\nOpen this first:\n{report.name}"
+            self.after(0, lambda: messagebox.showinfo(APP_TITLE, msg))
 
         self._run(job)
 
